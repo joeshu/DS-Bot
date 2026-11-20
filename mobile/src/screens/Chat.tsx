@@ -20,6 +20,7 @@ import { ActionRow, Dock } from './chat/dock.tsx'
 import { Composer, type Photo } from './chat/composer.tsx'
 import { Actions, Item, keysOf, PhotoViewer, PhotoViewerCtx, type ChatItem, type FileRef, type ImageRef } from './chat/items.tsx'
 import { bumpMarkdownImageCache } from './chat/markdown.tsx'
+import { sameItem } from './chat/item-equality.ts'
 
 // Feed events refresh the chat as things happen; the poll only catches what a
 // dropped event missed, so it runs rarely.
@@ -32,7 +33,8 @@ interface ChatPage { sessionId?: string; items: ChatItem[]; cursor: unknown }
 interface Row { item: ChatItem; key: string; stamp?: string }
 
 // A refreshed page reuses the item objects that did not change, so the memoized
-// rows keep their identity and only new or changed rows render again.
+// rows keep their identity and only new or changed rows render again. The
+// comparison is field by field (see item-equality.ts), not a JSON round trip.
 function keepSame(prev: ChatItem[], next: ChatItem[]): ChatItem[] {
   const prevKeys = keysOf(prev)
   const known = new Map(prev.map((item, index) => [prevKeys[index], item]))
@@ -40,7 +42,7 @@ function keepSame(prev: ChatItem[], next: ChatItem[]): ChatItem[] {
   let same = prev.length === next.length
   const merged = next.map((item, index) => {
     const old = known.get(nextKeys[index])
-    if (old !== undefined && JSON.stringify(old) === JSON.stringify(item)) { if (prev[index] !== old) same = false; return old }
+    if (old !== undefined && sameItem(old, item)) { if (prev[index] !== old) same = false; return old }
     same = false
     return item
   })
@@ -413,8 +415,9 @@ export function ChatView({ bot, room, header, onMissing }: { bot?: Bot; room?: R
     return all.map((item, index) => ({ item, key: keys[index], stamp: room !== undefined || item.local !== undefined ? undefined : stampOf(all, index) })).reverse()
   }, [items, pending, room !== undefined])
   // Group rows show each member's name, color and mark; a team refresh that changes
-  // none of these keeps the same map, so the rows are not drawn again.
-  const memberKey = JSON.stringify((team?.bots ?? []).map(entry => [entry.id, entry.name, entry.color, entry.avatar?.shape, entry.avatar?.imageRef ?? entry.avatar?.image?.length]))
+  // none of these keeps the same map, so the rows are not drawn again. The member
+  // list is small, but stringifying it on every render is still wasted work.
+  const memberKey = useMemo(() => JSON.stringify((team?.bots ?? []).map(entry => [entry.id, entry.name, entry.color, entry.avatar?.shape, entry.avatar?.imageRef ?? entry.avatar?.image?.length])), [team?.bots])
   const botsById = useMemo(() => new Map((team?.bots ?? []).map(entry => [entry.id, entry])), [memberKey])
   const canStop = room !== undefined ? roomWork.length > 0 : running
   const inRoom = room !== undefined

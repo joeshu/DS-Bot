@@ -1,0 +1,75 @@
+name: iOS unsigned IPA
+
+# Builds the phone app without any signing and keeps the .ipa as an artifact
+# for sideloading (AltStore, Sideloadly, TrollStore sign it on install). No
+# Apple account, certificate or profile is involved. Trigger it by hand:
+#   gh workflow run ios-unsigned.yml --ref main
+# The artifact keeps for 7 days, like the release dry run.
+#
+# The signed App Store path stays in mobile/scripts/ios-archive.sh; this file
+# does not touch it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-unsigned:
+    name: Phone app (iOS, unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --no-fund --no-audit --prefix ../link
+      - run: npm ci --no-fund --no-audit
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx expo prebuild --platform ios --no-install
+      - run: pod install
+        working-directory: mobile/ios
+      - name: Archive without signing
+        run: |
+          xcodebuild -workspace ios/DSBot.xcworkspace -scheme DSBot -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath ios/build/DSBot.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+      - name: Pack the unsigned IPA
+        run: |
+          app="$(ls -d ios/build/DSBot.xcarchive/Products/Applications/*.app | head -1)"
+          if [ -z "$app" ]; then echo "::error::No .app in the archive"; exit 1; fi
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$app" Payload/
+          version="$(node -p "require('../ds-bot/package.json').version")"
+          zip -r -q "DS-Bot-$version-ios-unsigned.ipa" Payload
+          rm -rf Payload
+          ls -l DS-Bot-*-ios-unsigned.ipa
+      - name: Check the IPA
+        run: |
+          ipa="$(ls DS-Bot-*-ios-unsigned.ipa)"
+          if ! unzip -l "$ipa" | grep -q 'Payload/.*\.app/Info\.plist'; then
+            echo "::error::$ipa has no Payload/*.app/Info.plist"
+            exit 1
+          fi
+          if unzip -l "$ipa" | grep -Eq 'Payload/.*\.app/.*CodeSignature'; then
+            echo "::error::$ipa is signed; expected an unsigned build"
+            exit 1
+          fi
+          echo "Unsigned IPA OK: $ipa ($(stat -f %z "$ipa" 2>/dev/null || stat -c %s "$ipa") bytes)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DS-Bot-ios-unsigned
+          path: mobile/DS-Bot-*-ios-unsigned.ipa
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
