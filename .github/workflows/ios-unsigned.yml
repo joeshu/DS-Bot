@@ -36,6 +36,20 @@ jobs:
       - run: npx expo prebuild --platform ios --no-install
       - run: pod install
         working-directory: mobile/ios
+      - name: Check Expo pod versions match npm
+        run: |
+          # pod install must resolve the Expo pods from node_modules, not
+          # from the CocoaPods specs repo: a mismatch here is how the 0.3.8
+          # IPA shipped ExpoFileSystem against an older ExpoModulesCore and
+          # died at launch with dyld "Symbol not found".
+          pod_version() { sed -n "s/^  - $1 (\(.*\))/\1/p" ios/Podfile.lock | head -1; }
+          for pair in "ExpoModulesCore:expo-modules-core" "ExpoFileSystem:expo-file-system"; do
+            pod="${pair%%:*}"; pkg="${pair##*:}"
+            pv="$(pod_version "$pod")"
+            nv="$(node -p "require('./node_modules/$pkg/package.json').version")"
+            echo "$pod: pod=$pv npm=$nv"
+            if [ "$pv" != "$nv" ]; then echo "::error::$pod pod version ($pv) != npm version ($nv)"; exit 1; fi
+          done
       - name: Archive without signing
         run: |
           xcodebuild -workspace ios/DSBot.xcworkspace -scheme DSBot -configuration Release \
@@ -66,6 +80,25 @@ jobs:
             exit 1
           fi
           echo "Unsigned IPA OK: $ipa ($(stat -f %z "$ipa" 2>/dev/null || stat -c %s "$ipa") bytes)"
+      - name: Check Expo framework symbols agree
+        run: |
+          # The 0.3.8 IPA died at launch: ExpoFileSystem referenced an
+          # ExpoModulesCore Swift symbol the bundled core did not define
+          # (dyld "Symbol not found"). Fail the build instead of shipping
+          # another IPA that crashes before any app code runs.
+          ipa="$(ls DS-Bot-*-ios-unsigned.ipa)"
+          rm -rf /tmp/ipa-symbols && mkdir -p /tmp/ipa-symbols
+          unzip -q "$ipa" -d /tmp/ipa-symbols
+          app="$(ls -d /tmp/ipa-symbols/Payload/*.app | head -1)"
+          core="$app/Frameworks/ExpoModulesCore.framework/ExpoModulesCore"
+          fs="$app/Frameworks/ExpoFileSystem.framework/ExpoFileSystem"
+          missing="$(comm -23 <(nm -u -arch arm64 "$fs" | grep -o '_\$s15ExpoModulesCore[^ ]*' | sort -u) <(nm -gU -arch arm64 "$core" | grep -o '_\$s15ExpoModulesCore[^ ]*' | sort -u))"
+          if [ -n "$missing" ]; then
+            echo "::error::ExpoFileSystem references ExpoModulesCore symbols the bundled core does not define:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "Expo framework symbols agree"
       - uses: actions/upload-artifact@v4
         with:
           name: DS-Bot-ios-unsigned
