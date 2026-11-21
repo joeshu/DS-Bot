@@ -111,9 +111,8 @@ jobs:
               | sort -u > /tmp/ipa-symbols/undef.txt || true
             m="$(comm -23 /tmp/ipa-symbols/undef.txt /tmp/ipa-symbols/defined.txt || true)"
             if [ -n "$m" ]; then
-              missing="$missing
-$(basename "$f"):
-$m"
+              printf -v entry '\n%s:\n%s' "$(basename "$f")" "$m"
+              missing="$missing$entry"
             fi
           done
           if [ -n "$missing" ]; then
