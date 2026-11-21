@@ -82,20 +82,42 @@ jobs:
           echo "Unsigned IPA OK: $ipa ($(stat -f %z "$ipa" 2>/dev/null || stat -c %s "$ipa") bytes)"
       - name: Check Expo framework symbols agree
         run: |
-          # The 0.3.8 IPA died at launch: ExpoFileSystem referenced an
-          # ExpoModulesCore Swift symbol the bundled core did not define
-          # (dyld "Symbol not found"). Fail the build instead of shipping
-          # another IPA that crashes before any app code runs.
+          # The 0.3.8 IPA died at launch twice: first ExpoFileSystem referenced
+          # an ExpoModulesCore Swift symbol the bundled core did not define,
+          # then ExpoModulesCore referenced RCTStatusBarAppearance, a class
+          # the bundled React framework did not define (dyld "Symbol not
+          # found" both times). Fail the build instead of shipping another
+          # IPA that crashes before any app code runs.
           ipa="$(ls DS-Bot-*-ios-unsigned.ipa)"
           rm -rf /tmp/ipa-symbols && mkdir -p /tmp/ipa-symbols
           unzip -q "$ipa" -d /tmp/ipa-symbols
           app="$(ls -d /tmp/ipa-symbols/Payload/*.app | head -1)"
-          core="$app/Frameworks/ExpoModulesCore.framework/ExpoModulesCore"
-          fs="$app/Frameworks/ExpoFileSystem.framework/ExpoFileSystem"
-          missing="$(comm -23 <(nm -u -arch arm64 "$fs" | grep -o '_\$s15ExpoModulesCore[^ ]*' | sort -u) <(nm -gU -arch arm64 "$core" | grep -o '_\$s15ExpoModulesCore[^ ]*' | sort -u))"
+          # Every symbol defined anywhere in the bundle.
+          : > /tmp/ipa-symbols/defined.txt
+          for f in "$app/DSBot" "$app"/Frameworks/*.framework/*; do
+            [ -f "$f" ] || continue
+            nm -gU -arch arm64 "$f" 2>/dev/null | awk 'NF>=3 {print $NF}' >> /tmp/ipa-symbols/defined.txt || true
+          done
+          sort -u /tmp/ipa-symbols/defined.txt -o /tmp/ipa-symbols/defined.txt
+          # Undefined symbols that belong to a bundled framework (React
+          # Native, Expo, ...) must be defined in the bundle. Symbols from
+          # the OS (UIKit, Foundation, ...) resolve at runtime and are not
+          # checked.
+          missing=""
+          for f in "$app"/Frameworks/*.framework/*; do
+            [ -f "$f" ] || continue
+            nm -u -arch arm64 "$f" 2>/dev/null | awk 'NF>=2 {print $NF}' \
+              | grep -E '^_OBJC_(CLASS|METACLASS)_\$_(RCT|Expo)|^_\$s[0-9]+(Expo|React)|^_(RCT|Expo)[A-Z]' \
+              | sort -u > /tmp/ipa-symbols/undef.txt || true
+            m="$(comm -23 /tmp/ipa-symbols/undef.txt /tmp/ipa-symbols/defined.txt || true)"
+            if [ -n "$m" ]; then
+              missing="$missing
+$(basename "$f"):
+$m"
+            fi
+          done
           if [ -n "$missing" ]; then
-            echo "::error::ExpoFileSystem references ExpoModulesCore symbols the bundled core does not define:"
-            echo "$missing"
+            echo "::error::Bundled frameworks reference symbols no bundled framework defines (dyld would abort at launch):$missing"
             exit 1
           fi
           echo "Expo framework symbols agree"
