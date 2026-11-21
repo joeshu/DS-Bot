@@ -42,7 +42,7 @@ jobs:
           # from the CocoaPods specs repo: a mismatch here is how the 0.3.8
           # IPA shipped ExpoFileSystem against an older ExpoModulesCore and
           # died at launch with dyld "Symbol not found".
-          pod_version() { sed -n "s/^  - $1 (\(.*\))/\1/p" ios/Podfile.lock | head -1; }
+          pod_version() { sed -n "s/^  - $1 (\([0-9.]*\)).*$/\1/p" ios/Podfile.lock | head -1; }
           for pair in "ExpoModulesCore:expo-modules-core" "ExpoFileSystem:expo-file-system"; do
             pod="${pair%%:*}"; pkg="${pair##*:}"
             pv="$(pod_version "$pod")"
