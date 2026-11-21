@@ -4,6 +4,8 @@ import { useIsFocused, useNavigation } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
 import { downloadFile } from '../team/file-download.ts'
+import { expoFileSource } from '../team/expo-file-source.ts'
+import { uploadFile, type PickedFile, type UploadReceipt } from '../team/file-upload.ts'
 import * as Sharing from 'expo-sharing'
 import type { Approval, Bot, Question, Room } from '../connection.ts'
 import { createChatCache } from '../team/chat-cache.ts'
@@ -82,7 +84,7 @@ export function prefetchChat(call: (endpoint: string, payload?: unknown) => Prom
 
 // Messages the phone sent that the chat has not shown back yet, per chat. They live
 // outside the screen so a send keeps going, and stays visible, across chat switches.
-interface Outgoing { item: ChatItem; photos: Photo[]; sessionId: string; known?: Set<string> }
+interface Outgoing { item: ChatItem; photos: Photo[]; files: PickedFile[]; sessionId: string; known?: Set<string> }
 const outbox = new Map<string, Outgoing[]>()
 const outboxListeners = new Set<() => void>()
 const EMPTY: Outgoing[] = []
@@ -355,7 +357,8 @@ export function ChatView({ bot, room, header, onMissing }: { bot?: Bot; room?: R
   const userMax = Math.round(chatWidth * (narrow ? 0.86 : width / 100))
 
   // Sending: the message shows at once and the composer clears; photos travel one
-  // by one, then the message names them. It stays until the chat shows it back.
+  // by one, then the message names them. Files go first: each one uploads in
+  // chunks, and the message names where the computer saved it.
   const pending = useSyncExternalStore(subscribeOutbox, () => outboxOf(chatKey))
   const deliver = useCallback(async (key: string, entry: Outgoing) => {
     const localId = entry.item.localId!
@@ -364,7 +367,9 @@ export function ChatView({ bot, room, header, onMissing }: { bot?: Bot; room?: R
     try {
       const images: string[] = []
       for (const photo of entry.photos) images.push(((await call('stage-image', { mediaType: photo.mediaType, data: photo.data })) as { id: string }).id)
-      await call('send', { sessionId: entry.sessionId, text: entry.item.text ?? '', ...(images.length > 0 ? { images } : {}) })
+      const receipts: UploadReceipt[] = []
+      for (const file of entry.files) receipts.push(await uploadFile(call, await expoFileSource(file)))
+      await call('send', { sessionId: entry.sessionId, text: entry.item.text ?? '', ...(images.length > 0 ? { images } : {}), ...(receipts.length > 0 ? { files: receipts } : {}) })
       // What the chat already holds, so only a new row of the same text counts as this one.
       const kept = pages.get(key)
       const all = [...(kept?.older ?? []), ...(kept?.page.items ?? [])]
@@ -379,9 +384,9 @@ export function ChatView({ bot, room, header, onMissing }: { bot?: Bot; room?: R
   }, [call])
   const latestKey = useRef(chatKey)
   latestKey.current = chatKey
-  const send = async (text: string, photos: Photo[]) => {
+  const send = async (text: string, photos: Photo[], files: PickedFile[]) => {
     const localId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const entry: Outgoing = { item: { kind: 'user', text, local: 'sending', localId, time: Date.now(), ...(photos.length > 0 ? { localImages: photos.map(photo => photo.uri) } : {}) }, photos, sessionId }
+    const entry: Outgoing = { item: { kind: 'user', text, local: 'sending', localId, time: Date.now(), ...(photos.length > 0 ? { localImages: photos.map(photo => photo.uri) } : {}), ...(files.length > 0 ? { localFiles: files.map(file => ({ name: file.name, size: file.size })) } : {}) }, photos, files, sessionId }
     setOutbox(chatKey, list => [...list, entry])
     // Once the new row is laid out, bring the latest messages into view.
     setTimeout(() => list.current?.scrollToOffset({ offset: 0, animated: true }), 60)
@@ -502,7 +507,7 @@ export function ChatView({ bot, room, header, onMissing }: { bot?: Bot; room?: R
       <Dock question={question} sessionId={sessionId} approvals={approvals} secrets={secrets} connectorRequests={connectorRequests} botName={bot?.name} onOpenConnector={connectorId => { if (connectorCanConnectOnMobile(connectorId)) navigation.navigate('Settings', { screen: 'Connectors', params: { focusId: connectorId }, initial: false }) }} btw={btw} handoff={browserHold} view={team?.views?.[sessionId]} call={call} p={p} expanded={expandedKey} onExpand={setExpandedKey} />
       {fileError ? <Text style={[type.small, { color: p.danger, textAlign: 'center', marginBottom: 4 }]} accessibilityRole="alert">{fileError}</Text> : null}
       {page !== null && loadError !== null ? <Text style={[type.small, { color: p.danger, textAlign: 'center', marginBottom: 4, marginHorizontal: 16 }]} accessibilityRole="alert">{loadError}</Text> : null}
-      <Composer name={bot?.name ?? room?.name ?? ''} running={running} canStop={canStop} canAttach={hello?.capabilities?.includes('send-images') === true} onSend={send} onStop={stop} p={p} />
+      <Composer name={bot?.name ?? room?.name ?? ''} running={running} canStop={canStop} canAttach={hello?.capabilities?.includes('send-images') === true} canUpload={hello?.capabilities?.includes('file-upload') === true} onSend={send} onStop={stop} p={p} />
       <Actions visible={menuText !== null} text={menuText ?? ''} p={p}
         onClose={() => setMenuText(null)}
         onSelect={() => { setReaderTitle(null); setReaderText(menuText); setMenuText(null) }} />

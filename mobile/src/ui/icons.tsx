@@ -33,6 +33,11 @@ export function PlusIcon({ size = 16, color }: IconProps) {
   return h(Svg, { width: size, height: size, viewBox: '0 0 20 20' },
     h(Path, { d: 'M10 4v12M4 10h12', stroke: use(color, p.ink2), strokeWidth: 1.6, strokeLinecap: 'round' }))
 }
+export function AttachIcon({ size = 20, color }: IconProps) {
+  const { p } = useTheme()
+  return h(Svg, { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: use(color, p.ink2), strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h(Path, { d: 'M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48' }))
+}
 export function ArrowUpIcon({ size = 16, color }: IconProps) {
   const { p } = useTheme()
   return h(Svg, { width: size, height: size, viewBox: '0 0 20 20' },

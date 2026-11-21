@@ -1,11 +1,13 @@
+import * as DocumentPicker from 'expo-document-picker'
 import * as Haptics from 'expo-haptics'
 import * as ImagePicker from 'expo-image-picker'
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
 import { useState } from 'react'
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { humanSize, type PickedFile } from '../../team/file-upload.ts'
 import { t } from '../../ui/i18n.ts'
-import { ArrowUpIcon, CloseIcon, PlusIcon, StopIcon } from '../../ui/icons.tsx'
+import { ArrowUpIcon, AttachIcon, CloseIcon, PlusIcon, StopIcon } from '../../ui/icons.tsx'
 import { radius, shadow, type as typeScale, type Palette } from '../../ui/tokens.ts'
 
 // A photo ready to send: shown from `uri`, sent as base64 JPEG.
@@ -25,13 +27,15 @@ async function prepare(asset: ImagePicker.ImagePickerAsset): Promise<Photo> {
 // The composer card: min height 44, radius 22 (18 when multi-line), level-1
 // shadow; send is a 36px accent circle. While the Bot runs and the draft is
 // empty a stop button shows instead of send. "+" adds photos when the
-// computer takes them.
-export function Composer({ name, running, canStop, canAttach, onSend, onStop, p }: {
-  name: string; running: boolean; canStop: boolean; canAttach: boolean
-  onSend: (text: string, photos: Photo[]) => Promise<void>; onStop: () => void; p: Palette
+// computer takes them; the paperclip adds a file, which travels to the
+// computer when the message goes.
+export function Composer({ name, running, canStop, canAttach, canUpload, onSend, onStop, p }: {
+  name: string; running: boolean; canStop: boolean; canAttach: boolean; canUpload: boolean
+  onSend: (text: string, photos: Photo[], files: PickedFile[]) => Promise<void>; onStop: () => void; p: Palette
 }) {
   const [text, setText] = useState('')
   const [photos, setPhotos] = useState<Photo[]>([])
+  const [files, setFiles] = useState<PickedFile[]>([])
   const [preparing, setPreparing] = useState(false)
   const [pickError, setPickError] = useState<string | null>(null)
   // Float above the home indicator (iOS) or the gesture bar (Android, drawn edge to
@@ -40,14 +44,15 @@ export function Composer({ name, running, canStop, canAttach, onSend, onStop, p 
   const insets = useSafeAreaInsets()
   const bottom = Math.max(insets.bottom, 10)
   const draft = text.trim()
-  const ready = (draft !== '' || photos.length > 0) && !preparing
+  const ready = (draft !== '' || photos.length > 0 || files.length > 0) && !preparing
   // The message shows in the chat at once; the composer is free for the next one.
   const send = () => {
     if (!ready) return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
     const sending = photos
-    setText(''); setPhotos([])
-    void onSend(draft, sending)
+    const sendingFiles = files
+    setText(''); setPhotos([]); setFiles([])
+    void onSend(draft, sending, sendingFiles)
   }
   const pick = async () => {
     setPickError(null)
@@ -61,7 +66,18 @@ export function Composer({ name, running, canStop, canAttach, onSend, onStop, p 
       setPickError(failure instanceof Error ? failure.message : String(failure))
     } finally { setPreparing(false) }
   }
-  const multi = text.includes('\n') || text.length > 80 || photos.length > 0
+  const pickFile = async () => {
+    setPickError(null)
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true, multiple: false })
+      if (result.canceled || result.assets.length === 0) return
+      const asset = result.assets[0]
+      setFiles(prev => [...prev, { uri: asset.uri, name: asset.name, size: asset.size, mimeType: asset.mimeType }])
+    } catch (failure) {
+      setPickError(failure instanceof Error ? failure.message : String(failure))
+    }
+  }
+  const multi = text.includes('\n') || text.length > 80 || photos.length > 0 || files.length > 0
   return (
     <View style={{ marginBottom: bottom }}>
       {pickError !== null ? <Text style={[typeScale.small, { color: p.danger, textAlign: 'center', marginBottom: 4 }]}>{pickError}</Text> : null}
@@ -80,10 +96,28 @@ export function Composer({ name, running, canStop, canAttach, onSend, onStop, p 
             {preparing ? <View style={[styles.photo, { backgroundColor: p.hover, alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={p.ink3} /></View> : null}
           </ScrollView>
         ) : null}
+        {files.length > 0 ? (
+          <View style={{ paddingHorizontal: 6, paddingTop: 6, paddingBottom: 2, gap: 4 }}>
+            {files.map(file => (
+              <View key={file.uri} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Text style={[typeScale.small, { color: p.ink, flex: 1 }]} numberOfLines={1}>{file.name}{file.size !== undefined ? ` (${humanSize(file.size)})` : ''}</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel={t('Remove')} hitSlop={8} onPress={() => setFiles(prev => prev.filter(entry => entry !== file))}
+                  style={{ width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: p.ink }}>
+                  <CloseIcon size={10} color={p.main} />
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        ) : null}
         <View style={styles.line}>
           {canAttach ? (
             <Pressable accessibilityRole="button" accessibilityLabel={t('Add photos')} onPress={() => void pick()} hitSlop={6} style={styles.attach}>
               <PlusIcon size={20} color={p.ink2} />
+            </Pressable>
+          ) : null}
+          {canUpload ? (
+            <Pressable accessibilityRole="button" accessibilityLabel={t('Add file')} onPress={() => void pickFile()} hitSlop={6} style={styles.attach}>
+              <AttachIcon size={20} color={p.ink2} />
             </Pressable>
           ) : null}
           <TextInput value={text} onChangeText={setText} placeholder={t('Message {name}', { name })} placeholderTextColor={p.ink3}

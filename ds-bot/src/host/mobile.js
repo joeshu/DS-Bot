@@ -5,13 +5,14 @@
 // profile photos by reference, direct memory edits, and usage totals for one Bot.
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { open, readFile, stat } from 'node:fs/promises'
-import { extname, isAbsolute, resolve } from 'node:path'
+import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HANDOFF_ACK, HISTORY_TIMEOUT_MS, SOURCE_KIND } from './constants.js'
 import { within } from './folders.js'
 import { PREVIEW_EDGE, previewImage } from './preview.js'
 import { relayRange } from '../shared/group-replies.js'
+import { FILE_CHUNK_BYTES } from '../shared/file-chunks.js'
 import { textOf } from './text.js'
 import { hourKeys } from './usage.js'
 
@@ -49,6 +50,7 @@ export const CAPABILITIES = [
   'file-download',
   'markdown-image',
   'file-download-chunks',
+  'file-upload',
   'write-state',
 ]
 export const NOTICE_KINDS = ['message', 'group', 'done', 'question', 'view', 'approval']
@@ -431,7 +433,6 @@ export function install(rt) {
   // base64 over the same call the rest of the phone API uses; the client writes
   // them to a file it can hand to Android.
   const FILE_DOWNLOAD_MAX = 16 * 1024 * 1024 // Compatibility for older, whole-file clients.
-  const FILE_CHUNK_BYTES = 512 * 1024
   const FILE_MIMES = { pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', zip: 'application/zip', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', mp3: 'audio/mpeg', mp4: 'video/mp4' }
   const nameOf = value => String(value).split(/[\\/]/).pop() || 'file'
   const mimeOf = value => FILE_MIMES[(nameOf(value).split('.').pop() ?? '').toLowerCase()] ?? 'application/octet-stream'
@@ -537,6 +538,111 @@ export function install(rt) {
       }
     }
     throw unavailable()
+  }
+
+  // Phone-to-computer file upload: chunks arrive one per call (a phone's link
+  // carries a few MB per message), are appended to a temp file, and the finished
+  // file lands in uploads/ under this computer's DSH home, so a container
+  // rebuild keeps it. The receipt names the saved path, so the Bot can read it.
+  const UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+  const UPLOAD_CHUNK_MAX = 1024 * 1024
+  const UPLOAD_TTL_MS = 30 * 60_000
+  const UPLOADS_MAX_OPEN = 8
+  const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
+  const uploads = new Map()
+  const uploadsDir = () => {
+    if (typeof rt.home !== 'string' || rt.home === '') throw Object.assign(new Error('Uploads unavailable'), { code: 'bot/refused' })
+    return join(rt.home, 'uploads')
+  }
+  const uploadName = value => String(value ?? '').split(/[\\/]/).pop().replace(/[\u0000-\u001f]/g, '_').trim()
+  const pruneUploads = async () => {
+    const now = Date.now()
+    for (const [id, entry] of uploads) {
+      if (entry.at < now - UPLOAD_TTL_MS) {
+        uploads.delete(id)
+        await entry.handle.close().catch(() => {})
+        await unlink(entry.tmpPath).catch(() => {})
+      }
+    }
+  }
+  const finalPathFor = async (dir, name) => {
+    const ext = extname(name)
+    const base = name.slice(0, name.length - ext.length) || 'file'
+    let candidate = join(dir, name)
+    for (let i = 1; i < 1000; i++) {
+      const info = await stat(candidate).catch(() => undefined)
+      if (info === undefined) return candidate
+      candidate = join(dir, `${base} (${i})${ext}`)
+    }
+    return candidate
+  }
+
+  async function fileUpload(body) {
+    await pruneUploads()
+    const dir = uploadsDir()
+    if (body.uploadId === undefined) {
+      const name = uploadName(body.name)
+      const size = Number(body.size)
+      if (name === '' || name === '.' || name === '..') throw Object.assign(new Error('No file named'), { code: 'bot/invalid' })
+      if (!Number.isSafeInteger(size) || size < 1 || size > UPLOAD_MAX_BYTES) throw Object.assign(new Error('This file is too large to send here (over 100 MB)'), { code: 'bot/refused' })
+      if (uploads.size >= UPLOADS_MAX_OPEN) throw Object.assign(new Error('Too many uploads at once. Finish one first.'), { code: 'bot/refused' })
+      await mkdir(dir, { recursive: true })
+      const uploadId = randomUUID()
+      const tmpPath = join(dir, `.${uploadId}.part`)
+      const handle = await open(tmpPath, 'wx')
+      uploads.set(uploadId, {
+        name, mime: typeof body.mime === 'string' && body.mime !== '' ? body.mime : 'application/octet-stream',
+        size, received: 0, handle, tmpPath, at: Date.now(),
+      })
+      return { uploadId, nextOffset: 0 }
+    }
+    const uploadId = String(body.uploadId)
+    const entry = uploads.get(uploadId)
+    if (entry === undefined) throw Object.assign(new Error('This upload is no longer open. Send the file again.'), { code: 'bot/not-found' })
+    const offset = Number(body.offset)
+    if (!Number.isSafeInteger(offset) || offset !== entry.received) throw Object.assign(new Error('This upload is out of order. Send the file again.'), { code: 'bot/invalid' })
+    const data = typeof body.data === 'string' ? body.data : ''
+    if (data === '' || !BASE64_RE.test(data)) throw Object.assign(new Error('This is not a file DS Bot can receive'), { code: 'bot/invalid' })
+    const bytes = Buffer.from(data, 'base64')
+    if (bytes.length === 0 || bytes.length > UPLOAD_CHUNK_MAX || entry.received + bytes.length > entry.size) {
+      throw Object.assign(new Error('This upload does not match its file. Send the file again.'), { code: 'bot/invalid' })
+    }
+    try {
+      await entry.handle.write(bytes, 0, bytes.length, offset)
+    } catch (error) {
+      uploads.delete(uploadId)
+      await entry.handle.close().catch(() => {})
+      await unlink(entry.tmpPath).catch(() => {})
+      throw error
+    }
+    entry.received += bytes.length
+    entry.at = Date.now()
+    const done = body.done === true || entry.received === entry.size
+    if (done && entry.received !== entry.size) {
+      uploads.delete(uploadId)
+      await entry.handle.close().catch(() => {})
+      await unlink(entry.tmpPath).catch(() => {})
+      throw Object.assign(new Error('This file arrived incomplete. Send it again.'), { code: 'bot/invalid' })
+    }
+    if (!done) return { uploadId, nextOffset: entry.received, done: false }
+    uploads.delete(uploadId)
+    await entry.handle.close()
+    const finalPath = await finalPathFor(dir, entry.name)
+    await rename(entry.tmpPath, finalPath)
+    return { uploadId, path: finalPath, name: basename(finalPath), size: entry.size, done: true }
+  }
+
+  // A file the phone already uploaded, checked before the Bot is told about it:
+  // the path must be one of this computer's uploads, and the size must match.
+  async function uploadReceipt(file) {
+    const dir = uploadsDir()
+    const path = typeof file?.path === 'string' ? resolve(file.path) : ''
+    if (path === '' || !within(path, dir)) throw Object.assign(new Error('Unknown file'), { code: 'bot/not-found' })
+    const info = await stat(path).catch(() => undefined)
+    if (info?.isFile() !== true) throw Object.assign(new Error('Unknown file'), { code: 'bot/not-found' })
+    const size = Number(file?.size)
+    if (!Number.isSafeInteger(size) || size !== info.size) throw Object.assign(new Error('Unknown file'), { code: 'bot/not-found' })
+    return { name: basename(path), path, size: info.size }
   }
 
   const MARKDOWN_IMAGE_MAX = 8 * 1024 * 1024
@@ -646,6 +752,7 @@ export function install(rt) {
       case 'room-chat': return roomChat(body)
       case 'image': return image(body)
       case 'file-download': return fileDownload(body)
+      case 'file-upload': return fileUpload(body)
       case 'markdown-image': return markdownImage(body)
       case 'usage-summary': return usageSummary(body)
       case 'memory-edit': return rt.memoryEdit({ ...memoryTarget(body), scope: body.scope, topic: body.topic, text: body.text, next: body.next })
@@ -654,5 +761,5 @@ export function install(rt) {
     }
   }
 
-  Object.assign(rt, { addNotice, mobileEndpoint })
+  Object.assign(rt, { addNotice, mobileEndpoint, uploadReceipt })
 }

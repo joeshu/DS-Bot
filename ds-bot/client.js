@@ -39151,6 +39151,7 @@ function installHeaderNavigation(slots, face, component, priority) {
 }
 
 // src/shared/file-chunks.js
+var FILE_CHUNK_BYTES = 512 * 1024;
 async function* fileChunks(call2, target) {
   let offset = 0;
   let version;

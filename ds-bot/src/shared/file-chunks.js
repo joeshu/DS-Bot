@@ -1,4 +1,7 @@
 // A bounded response fits the encrypted link; consumers write each chunk before asking for more.
+// One chunk of a file, either way across the link: 512 KB of bytes, about 683 KB as base64.
+export const FILE_CHUNK_BYTES = 512 * 1024
+
 /**
  * @param {(endpoint: string, payload: object) => Promise<any>} call
  * @param {object} target

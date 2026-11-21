@@ -1,7 +1,7 @@
 import { fileChunks } from '../src/shared/file-chunks.js'
 import assert from 'node:assert/strict'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -375,6 +375,67 @@ test('a phone stages photos one by one, then send puts them in one message with 
   assert.equal((await call('send', { sessionId: chief, text: '', images: [third] })).ok, true)
   assert.deepEqual(sent.at(-1).prompt.content, [{ type: 'image', mediaType: 'image/jpeg', data: pixel }])
   assert.equal((await call('hello', {})).value.capabilities.includes('send-images'), true)
+  await stop()
+})
+
+test('a phone uploads a file in chunks, and it lands in uploads/ with its bytes', async () => {
+  const { call, rt, sent, stop } = start()
+  const { chief } = await team(call)
+  const bytes = Buffer.from('hello file upload, chunked and reassembled', 'utf8')
+  const size = bytes.length
+  const { uploadId, nextOffset } = (await call('file-upload', { name: 'notes.txt', mime: 'text/plain', size })).value
+  assert.equal(nextOffset, 0)
+  // A chunk at the wrong offset is refused, and the upload stays open.
+  assert.equal((await call('file-upload', { uploadId, offset: 1, data: bytes.subarray(0, 5).toString('base64'), done: false })).error.code, 'bot/invalid')
+  assert.equal((await call('file-upload', { uploadId, offset: 0, data: 'not base64!!', done: false })).error.code, 'bot/invalid')
+  const half = Math.floor(size / 2)
+  const first = await call('file-upload', { uploadId, offset: 0, data: bytes.subarray(0, half).toString('base64'), done: false })
+  assert.equal(first.value.nextOffset, half)
+  assert.equal(first.value.done, false)
+  const receipt = (await call('file-upload', { uploadId, offset: half, data: bytes.subarray(half).toString('base64'), done: true })).value
+  assert.equal(receipt.done, true)
+  assert.equal(receipt.name, 'notes.txt')
+  assert.equal(receipt.size, size)
+  assert.equal(receipt.path.startsWith(join(rt.home, 'uploads')), true)
+  assert.equal(readFileSync(receipt.path, 'utf8'), bytes.toString('utf8'))
+  // A second upload of the same name does not overwrite the first.
+  const second = (await call('file-upload', { name: 'notes.txt', mime: 'text/plain', size })).value
+  const secondReceipt = (await call('file-upload', { uploadId: second.uploadId, offset: 0, data: bytes.toString('base64'), done: true })).value
+  assert.equal(secondReceipt.name, 'notes (1).txt')
+  assert.notEqual(secondReceipt.path, receipt.path)
+  assert.equal(readFileSync(secondReceipt.path, 'utf8'), bytes.toString('utf8'))
+  // send names the saved file to the Bot, with its path and size.
+  const before = sent.length
+  assert.equal((await call('send', { sessionId: chief, text: 'here it is', files: [receipt] })).value, true)
+  const prompt = sent.slice(before).find(entry => entry.prompt !== undefined).prompt
+  assert.equal(prompt.content[0].text, 'here it is')
+  assert.equal(prompt.content[1].type, 'text')
+  assert.match(prompt.content[1].text, /notes\.txt/)
+  assert.match(prompt.content[1].text, /保存到 /)
+  assert.ok(prompt.content[1].text.includes(receipt.path))
+  // A file alone, with no text, is a message too.
+  assert.equal((await call('send', { sessionId: chief, text: '', files: [secondReceipt] })).value, true)
+  // A made-up path is refused, so the Bot is never told about a file that is not there.
+  assert.equal((await call('send', { sessionId: chief, text: '', files: [{ name: 'x.txt', path: '/etc/passwd', size: 1 }] })).error.code, 'bot/not-found')
+  assert.equal((await call('send', { sessionId: chief, text: '', files: [{ name: 'notes.txt', path: receipt.path, size: size + 1 }] })).error.code, 'bot/not-found')
+  assert.equal((await call('hello', {})).value.capabilities.includes('file-upload'), true)
+  await stop()
+})
+
+test('file-upload refuses an oversize file, a nameless file, and a name that escapes uploads', async () => {
+  const { call, rt, stop } = start()
+  assert.equal((await call('file-upload', { name: 'big.bin', mime: 'application/octet-stream', size: 101 * 1024 * 1024 })).error.code, 'bot/refused')
+  assert.equal((await call('file-upload', { name: '', mime: 'text/plain', size: 10 })).error.code, 'bot/invalid')
+  assert.equal((await call('file-upload', { name: 'x.bin', mime: 'application/octet-stream', size: 0 })).error.code, 'bot/refused')
+  // A name that tries to climb out of uploads/ is flattened to its last part.
+  const bytes = Buffer.from('evil', 'utf8')
+  const { uploadId } = (await call('file-upload', { name: '../../evil.txt', mime: 'text/plain', size: bytes.length })).value
+  const receipt = (await call('file-upload', { uploadId, offset: 0, data: bytes.toString('base64'), done: true })).value
+  assert.equal(receipt.name, 'evil.txt')
+  assert.equal(receipt.path, join(rt.home, 'uploads', 'evil.txt'))
+  assert.equal(readFileSync(receipt.path, 'utf8'), 'evil')
+  // An upload id the computer never opened is refused.
+  assert.equal((await call('file-upload', { uploadId: 'nope', offset: 0, data: bytes.toString('base64'), done: true })).error.code, 'bot/not-found')
   await stop()
 })
 

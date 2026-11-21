@@ -4,6 +4,7 @@ import { ActivityIndicator, Dimensions, Image, Modal, Pressable, ScrollView, Sty
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
 import { t, clockLabel, messageClock } from '../../ui/i18n.ts'
+import { humanSize } from '../../team/file-upload.ts'
 import { CheckIcon } from '../../ui/icons.tsx'
 import { Avatar } from '../../ui/marks.tsx'
 import type { Bot } from '../../connection.ts'
@@ -58,6 +59,8 @@ export interface ChatItem {
   texts?: string[]
   // Photos picked on this phone, shown from the device until the computer has them.
   localImages?: string[]
+  // Files picked on this phone, shown by name until the computer has them.
+  localFiles?: { name: string; size?: number }[]
   // A message the phone sent that the computer has not shown back yet.
   local?: 'sending' | 'failed'
   localId?: string
@@ -248,6 +251,11 @@ export const Item = memo(function Item({ item, p, flat, maxWidth, inRoom, sessio
           photosOnly ? { backgroundColor: 'transparent', paddingHorizontal: 0, paddingVertical: 0 } : null]}>
         {item.text ? <Markdown text={item.text} p={p} textColor={p.userInk} bg={p.user} sessionId={rowSessionId} botId={authorBotId} /> : null}
         {chips}
+        {item.localFiles !== undefined && item.localFiles.length > 0
+          ? item.localFiles.map(file => (
+            <Text key={file.name} style={[type.caption, { color: p.userInk, opacity: 0.8, marginTop: 4 }]}>{file.name}{file.size !== undefined ? ` (${humanSize(file.size)})` : ''}</Text>
+          ))
+          : null}
         {item.localImages !== undefined && item.localImages.length > 0
           ? <LocalImages uris={item.localImages} />
           : item.imageRefs !== undefined && item.imageRefs.length > 0 && rowSessionId !== undefined

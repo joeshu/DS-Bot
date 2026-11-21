@@ -27,6 +27,14 @@ const LANGUAGES = {
 const RUN_STATS = ['sessionStats', 'tokenUsage', 'contextPressure']
 
 const invalid = message => Object.assign(new Error(message), { code: 'bot/invalid' })
+// A file size in words, for the receipt the Bot reads when a file arrives.
+const humanSize = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
 // Programming and file system errors are DS Bot's own faults, logged with their stack;
 // any other error is a refusal whose message is meant for the user.
 const isInternal = error => error instanceof TypeError || error instanceof ReferenceError || error instanceof RangeError
@@ -657,6 +665,7 @@ export function install(rt) {
         case 'room-chat':
         case 'image':
         case 'file-download':
+        case 'file-upload':
         case 'markdown-image':
         case 'usage-summary':
         case 'memory-edit':
@@ -707,15 +716,24 @@ export function install(rt) {
         case 'send': {
           const text = String(body.text ?? '').trim()
           const ids = Array.isArray(body.images) ? body.images.map(String) : []
-          if ((text === '' && ids.length === 0) || typeof body.sessionId !== 'string') return fail('Nothing to send', 'bot/invalid')
+          const files = Array.isArray(body.files) ? body.files : []
+          if ((text === '' && ids.length === 0 && files.length === 0) || typeof body.sessionId !== 'string') return fail('Nothing to send', 'bot/invalid')
           const images = ids.map(id => staged.get(id))
           if (images.some(entry => entry === undefined)) return fail('A photo did not arrive. Send it again.', 'bot/stale')
+          // Files the phone already uploaded: check each one is really on this
+          // computer before the Bot is told about it, so a made-up path is refused.
+          const receipts = []
+          for (const file of files) {
+            if (typeof rt.uploadReceipt !== 'function') return fail('This computer does not take files yet', 'bot/refused')
+            receipts.push(await rt.uploadReceipt(file))
+          }
           await rt.load()
           await rt.sendUser({
             sessionId: body.sessionId,
             content: [
               ...(text === '' ? [] : [{ type: 'text', text }]),
               ...images.map(({ mediaType, data }) => ({ type: 'image', mediaType, data })),
+              ...receipts.map(({ name, path, size }) => ({ type: 'text', text: `已上传文件：${name}（${humanSize(size)}），保存到 ${path}` })),
             ],
           })
           for (const id of ids) staged.delete(id)
